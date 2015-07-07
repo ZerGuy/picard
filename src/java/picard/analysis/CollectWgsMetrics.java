@@ -18,8 +18,8 @@ import htsjdk.samtools.util.SamLocusIterator;
 import picard.cmdline.CommandLineProgram;
 import picard.cmdline.CommandLineProgramProperties;
 import picard.cmdline.Option;
-import picard.cmdline.programgroups.Metrics;
 import picard.cmdline.StandardOptionDefinitions;
+import picard.cmdline.programgroups.Metrics;
 import picard.util.MathUtil;
 
 import java.io.File;
@@ -128,6 +128,11 @@ public class CollectWgsMetrics extends CommandLineProgram {
 
     @Override
     protected int doWork() {
+
+        //*** Time
+        long time1 = System.currentTimeMillis();
+        long time2, elapsed;
+
         IOUtil.assertFileIsReadable(INPUT);
         IOUtil.assertFileIsWritable(OUTPUT);
         IOUtil.assertFileIsReadable(REFERENCE_SEQUENCE);
@@ -163,8 +168,21 @@ public class CollectWgsMetrics extends CommandLineProgram {
         long basesExcludedByOverlap = 0;
         long basesExcludedByCapping = 0;
 
+        //*** Time
+        time2 = System.currentTimeMillis();
+        elapsed = time2 - time1;
+        System.out.println("Step 1 (start - before while): " + elapsed);
+        time1 = System.currentTimeMillis();
+
+        double step1=0, step2=0, step3=0;
+        long temp1, temp2;
+        long myCounter=0;
+
         // Loop through all the loci
         while (iterator.hasNext()) {
+            myCounter++;
+            temp1=System.nanoTime();
+
             final SamLocusIterator.LocusInfo info = iterator.next();
 
             // Check that the reference is not N
@@ -172,18 +190,32 @@ public class CollectWgsMetrics extends CommandLineProgram {
             final byte base = ref.getBases()[info.getPosition() - 1];
             if (base == 'N') continue;
 
+            //
+            temp2 = System.nanoTime();
+            step1+=temp2-temp1;
+
             // Figure out the coverage while not counting overlapping reads twice, and excluding various things
             final HashSet<String> readNames = new HashSet<String>(info.getRecordAndPositions().size());
             int pileupSize = 0;
             for (final SamLocusIterator.RecordAndOffset recs : info.getRecordAndPositions()) {
 
-                if (recs.getBaseQuality() < MINIMUM_BASE_QUALITY)                   { ++basesExcludedByBaseq;   continue; }
-                if (!readNames.add(recs.getRecord().getReadName()))                 { ++basesExcludedByOverlap; continue; }
+                if (recs.getBaseQuality() < MINIMUM_BASE_QUALITY) {
+                    ++basesExcludedByBaseq;
+                    continue;
+                }
+                if (!readNames.add(recs.getRecord().getReadName())) {
+                    ++basesExcludedByOverlap;
+                    continue;
+                }
                 pileupSize++;
                 if (pileupSize <= max) {
                     baseQHistogramArray[recs.getRecord().getBaseQualities()[recs.getOffset()]]++;
                 }
             }
+
+            //
+            temp1=System.nanoTime();
+            step2+=temp1-temp2;
 
             final int depth = Math.min(readNames.size(), max);
             if (depth < readNames.size()) basesExcludedByCapping += readNames.size() - max;
@@ -192,7 +224,20 @@ public class CollectWgsMetrics extends CommandLineProgram {
             // Record progress and perhaps stop
             progress.record(info.getSequenceName(), info.getPosition());
             if (usingStopAfter && ++counter > stopAfter) break;
+
+            temp2=System.nanoTime();
+            step3+=temp2-temp1;
         }
+
+        //*** Time
+        time2 = System.currentTimeMillis();
+        elapsed = time2 - time1;
+        System.out.println("Step 2 (while): " + elapsed);
+        step1/=myCounter;
+        step2/=myCounter;
+        step3/=myCounter;
+        System.out.println("WHILE: Step 1: " + step1 + "; Step 2: " + step2 + "; Step 3: " + step3);
+        time1 = System.currentTimeMillis();
 
         // Construct and write the outputs
         final Histogram<Integer> histo = new Histogram<Integer>("coverage", "count");
@@ -200,11 +245,23 @@ public class CollectWgsMetrics extends CommandLineProgram {
             histo.increment(i, HistogramArray[i]);
         }
 
+        //*** Time
+        time2 = System.currentTimeMillis();
+        elapsed = time2 - time1;
+        System.out.println("Step 3 (histo): " + elapsed);
+        time1 = System.currentTimeMillis();
+
         // Construct and write the outputs
         final Histogram<Integer> baseQHisto = new Histogram<Integer>("value", "baseq_count");
-        for (int i=0; i<baseQHistogramArray.length; ++i) {
+        for (int i = 0; i < baseQHistogramArray.length; ++i) {
             baseQHisto.increment(i, baseQHistogramArray[i]);
         }
+
+        //*** Time
+        time2 = System.currentTimeMillis();
+        elapsed = time2 - time1;
+        System.out.println("Step 4 (baseQHisto): " + elapsed);
+        time1 = System.currentTimeMillis();
 
         final WgsMetrics metrics = generateWgsMetrics();
         metrics.GENOME_TERRITORY = (long) histo.getSumOfValues();
@@ -212,6 +269,12 @@ public class CollectWgsMetrics extends CommandLineProgram {
         metrics.SD_COVERAGE = histo.getStandardDeviation();
         metrics.MEDIAN_COVERAGE = histo.getMedian();
         metrics.MAD_COVERAGE = histo.getMedianAbsoluteDeviation();
+
+        //*** Time
+        time2 = System.currentTimeMillis();
+        elapsed = time2 - time1;
+        System.out.println("Step 5 (generateWgsMetrics): " + elapsed);
+        time1 = System.currentTimeMillis();
 
         final long basesExcludedByDupes = dupeFilter.getFilteredBases();
         final long basesExcludedByMapq = mapqFilter.getFilteredBases();
@@ -225,6 +288,12 @@ public class CollectWgsMetrics extends CommandLineProgram {
         metrics.PCT_EXC_OVERLAP = basesExcludedByOverlap / totalWithExcludes;
         metrics.PCT_EXC_CAPPED = basesExcludedByCapping / totalWithExcludes;
         metrics.PCT_EXC_TOTAL = (totalWithExcludes - total) / totalWithExcludes;
+
+        //*** Time
+        time2 = System.currentTimeMillis();
+        elapsed = time2 - time1;
+        System.out.println("Step 6: " + elapsed);
+        time1 = System.currentTimeMillis();
 
         metrics.PCT_5X = MathUtil.sum(HistogramArray, 5, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
         metrics.PCT_10X = MathUtil.sum(HistogramArray, 10, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
@@ -240,6 +309,12 @@ public class CollectWgsMetrics extends CommandLineProgram {
         metrics.PCT_90X = MathUtil.sum(HistogramArray, 90, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
         metrics.PCT_100X = MathUtil.sum(HistogramArray, 100, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
 
+        //*** Time
+        time2 = System.currentTimeMillis();
+        elapsed = time2 - time1;
+        System.out.println("Step 7: " + elapsed);
+        time1 = System.currentTimeMillis();
+
         final MetricsFile<WgsMetrics, Integer> out = getMetricsFile();
         out.addMetric(metrics);
         out.addHistogram(histo);
@@ -247,6 +322,11 @@ public class CollectWgsMetrics extends CommandLineProgram {
             out.addHistogram(baseQHisto);
         }
         out.write(OUTPUT);
+
+        //*** Time
+        time2 = System.currentTimeMillis();
+        elapsed = time2 - time1;
+        System.out.println("Step 8 (end): " + elapsed);
 
         return 0;
     }
