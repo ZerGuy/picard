@@ -26,6 +26,10 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Computes a number of metrics that are useful for evaluating coverage and performance of whole genome sequencing experiments.
@@ -158,15 +162,22 @@ public class CollectWgsMetrics extends CommandLineProgram {
         iterator.setIncludeNonPfReads(false);
 
         final int max = COVERAGE_CAP;
-        final long[] HistogramArray = new long[max + 1];
-        final long[] baseQHistogramArray = new long[Byte.MAX_VALUE];
+        final AtomicLong[] HistogramArray = new AtomicLong[max + 1];
+        final AtomicLong[] baseQHistogramArray = new AtomicLong[Byte.MAX_VALUE];
         final boolean usingStopAfter = STOP_AFTER > 0;
         final long stopAfter = STOP_AFTER - 1;
         long counter = 0;
 
-        long basesExcludedByBaseq = 0;
-        long basesExcludedByOverlap = 0;
-        long basesExcludedByCapping = 0;
+        final AtomicLong basesExcludedByBaseq = new AtomicLong(0);
+        final AtomicLong basesExcludedByOverlap = new AtomicLong(0);
+        final AtomicLong basesExcludedByCapping = new AtomicLong(0);
+
+        for (int i = 0; i < HistogramArray.length; i++) {
+            HistogramArray[i] = new AtomicLong(0);
+        }
+        for (int i = 0; i < baseQHistogramArray.length; i++) {
+            baseQHistogramArray[i] = new AtomicLong(0);
+        }
 
         //*** Time
         time2 = System.currentTimeMillis();
@@ -174,15 +185,10 @@ public class CollectWgsMetrics extends CommandLineProgram {
         System.out.println("Step 1 (start - before while): " + elapsed);
         time1 = System.currentTimeMillis();
 
-        double step1=0, step2=0, step3=0;
-        long temp1, temp2;
-        long myCounter=0;
+        ExecutorService executorService = Executors.newFixedThreadPool(2);
 
         // Loop through all the loci
         while (iterator.hasNext()) {
-            myCounter++;
-            temp1=System.nanoTime();
-
             final SamLocusIterator.LocusInfo info = iterator.next();
 
             // Check that the reference is not N
@@ -190,59 +196,63 @@ public class CollectWgsMetrics extends CommandLineProgram {
             final byte base = ref.getBases()[info.getPosition() - 1];
             if (base == 'N') continue;
 
-            //
-            temp2 = System.nanoTime();
-            step1+=temp2-temp1;
+            executorService.submit(new Runnable() {
+                @Override
+                public void run() {
 
-            // Figure out the coverage while not counting overlapping reads twice, and excluding various things
-            final HashSet<String> readNames = new HashSet<String>(info.getRecordAndPositions().size());
-            int pileupSize = 0;
-            for (final SamLocusIterator.RecordAndOffset recs : info.getRecordAndPositions()) {
+                    // Figure out the coverage while not counting overlapping reads twice, and excluding various things
+                    final HashSet<String> readNames = new HashSet<String>(info.getRecordAndPositions().size());
+                    int pileupSize = 0;
+                    for (final SamLocusIterator.RecordAndOffset recs : info.getRecordAndPositions()) {
 
-                if (recs.getBaseQuality() < MINIMUM_BASE_QUALITY) {
-                    ++basesExcludedByBaseq;
-                    continue;
+                        if (recs.getBaseQuality() < MINIMUM_BASE_QUALITY) {
+                            basesExcludedByBaseq.incrementAndGet();
+                            continue;
+                        }
+                        if (!readNames.add(recs.getRecord().getReadName())) {
+                            basesExcludedByOverlap.incrementAndGet();
+                            continue;
+                        }
+                        pileupSize++;
+                        if (pileupSize <= max) {
+                            baseQHistogramArray[recs.getRecord().getBaseQualities()[recs.getOffset()]].incrementAndGet();
+                        }
+                    }
+
+                    final int depth = Math.min(readNames.size(), max);
+                    if (depth < readNames.size())
+                        basesExcludedByCapping.addAndGet(readNames.size() - max);
+                    HistogramArray[depth].incrementAndGet();
+
                 }
-                if (!readNames.add(recs.getRecord().getReadName())) {
-                    ++basesExcludedByOverlap;
-                    continue;
-                }
-                pileupSize++;
-                if (pileupSize <= max) {
-                    baseQHistogramArray[recs.getRecord().getBaseQualities()[recs.getOffset()]]++;
-                }
-            }
+            });
 
-            //
-            temp1=System.nanoTime();
-            step2+=temp1-temp2;
-
-            final int depth = Math.min(readNames.size(), max);
-            if (depth < readNames.size()) basesExcludedByCapping += readNames.size() - max;
-            HistogramArray[depth]++;
 
             // Record progress and perhaps stop
             progress.record(info.getSequenceName(), info.getPosition());
-            if (usingStopAfter && ++counter > stopAfter) break;
 
-            temp2=System.nanoTime();
-            step3+=temp2-temp1;
+
+            if (usingStopAfter && ++counter > stopAfter)
+                break;
+        }
+
+        executorService.shutdown();
+        try {
+            executorService.awaitTermination(1, TimeUnit.DAYS);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
         }
 
         //*** Time
         time2 = System.currentTimeMillis();
         elapsed = time2 - time1;
         System.out.println("Step 2 (while): " + elapsed);
-        step1/=myCounter;
-        step2/=myCounter;
-        step3/=myCounter;
-        System.out.println("WHILE: Step 1: " + step1 + "; Step 2: " + step2 + "; Step 3: " + step3);
         time1 = System.currentTimeMillis();
 
         // Construct and write the outputs
         final Histogram<Integer> histo = new Histogram<Integer>("coverage", "count");
         for (int i = 0; i < HistogramArray.length; ++i) {
-            histo.increment(i, HistogramArray[i]);
+            histo.increment(i, HistogramArray[i].get());
         }
 
         //*** Time
@@ -254,7 +264,7 @@ public class CollectWgsMetrics extends CommandLineProgram {
         // Construct and write the outputs
         final Histogram<Integer> baseQHisto = new Histogram<Integer>("value", "baseq_count");
         for (int i = 0; i < baseQHistogramArray.length; ++i) {
-            baseQHisto.increment(i, baseQHistogramArray[i]);
+            baseQHisto.increment(i, baseQHistogramArray[i].get());
         }
 
         //*** Time
@@ -280,13 +290,14 @@ public class CollectWgsMetrics extends CommandLineProgram {
         final long basesExcludedByMapq = mapqFilter.getFilteredBases();
         final long basesExcludedByPairing = pairFilter.getFilteredBases();
         final double total = histo.getSum();
-        final double totalWithExcludes = total + basesExcludedByDupes + basesExcludedByMapq + basesExcludedByPairing + basesExcludedByBaseq + basesExcludedByOverlap + basesExcludedByCapping;
+        final double totalWithExcludes = total + basesExcludedByDupes + basesExcludedByMapq + basesExcludedByPairing +
+                basesExcludedByBaseq.get() + basesExcludedByOverlap.get() + basesExcludedByCapping.get();
         metrics.PCT_EXC_DUPE = basesExcludedByDupes / totalWithExcludes;
         metrics.PCT_EXC_MAPQ = basesExcludedByMapq / totalWithExcludes;
         metrics.PCT_EXC_UNPAIRED = basesExcludedByPairing / totalWithExcludes;
-        metrics.PCT_EXC_BASEQ = basesExcludedByBaseq / totalWithExcludes;
-        metrics.PCT_EXC_OVERLAP = basesExcludedByOverlap / totalWithExcludes;
-        metrics.PCT_EXC_CAPPED = basesExcludedByCapping / totalWithExcludes;
+        metrics.PCT_EXC_BASEQ = basesExcludedByBaseq.get() / totalWithExcludes;
+        metrics.PCT_EXC_OVERLAP = basesExcludedByOverlap.get() / totalWithExcludes;
+        metrics.PCT_EXC_CAPPED = basesExcludedByCapping.get() / totalWithExcludes;
         metrics.PCT_EXC_TOTAL = (totalWithExcludes - total) / totalWithExcludes;
 
         //*** Time
@@ -295,19 +306,24 @@ public class CollectWgsMetrics extends CommandLineProgram {
         System.out.println("Step 6: " + elapsed);
         time1 = System.currentTimeMillis();
 
-        metrics.PCT_5X = MathUtil.sum(HistogramArray, 5, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_10X = MathUtil.sum(HistogramArray, 10, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_15X = MathUtil.sum(HistogramArray, 15, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_20X = MathUtil.sum(HistogramArray, 20, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_25X = MathUtil.sum(HistogramArray, 25, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_30X = MathUtil.sum(HistogramArray, 30, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_40X = MathUtil.sum(HistogramArray, 40, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_50X = MathUtil.sum(HistogramArray, 50, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_60X = MathUtil.sum(HistogramArray, 60, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_70X = MathUtil.sum(HistogramArray, 70, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_80X = MathUtil.sum(HistogramArray, 80, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_90X = MathUtil.sum(HistogramArray, 90, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
-        metrics.PCT_100X = MathUtil.sum(HistogramArray, 100, HistogramArray.length) / (double) metrics.GENOME_TERRITORY;
+        final long[] HistogramArrayL = new long[max + 1];
+        for (int i = 0; i < HistogramArrayL.length; i++) {
+            HistogramArrayL[i] = HistogramArray[i].get();
+        }
+
+        metrics.PCT_5X = MathUtil.sum(HistogramArrayL, 5, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_10X = MathUtil.sum(HistogramArrayL, 10, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_15X = MathUtil.sum(HistogramArrayL, 15, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_20X = MathUtil.sum(HistogramArrayL, 20, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_25X = MathUtil.sum(HistogramArrayL, 25, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_30X = MathUtil.sum(HistogramArrayL, 30, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_40X = MathUtil.sum(HistogramArrayL, 40, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_50X = MathUtil.sum(HistogramArrayL, 50, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_60X = MathUtil.sum(HistogramArrayL, 60, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_70X = MathUtil.sum(HistogramArrayL, 70, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_80X = MathUtil.sum(HistogramArrayL, 80, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_90X = MathUtil.sum(HistogramArrayL, 90, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
+        metrics.PCT_100X = MathUtil.sum(HistogramArrayL, 100, HistogramArrayL.length) / (double) metrics.GENOME_TERRITORY;
 
         //*** Time
         time2 = System.currentTimeMillis();
