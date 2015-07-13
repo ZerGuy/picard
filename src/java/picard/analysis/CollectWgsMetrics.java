@@ -200,37 +200,39 @@ public class CollectWgsMetrics extends CommandLineProgram {
                 @Override
                 public void run() {
 
-                    // Figure out the coverage while not counting overlapping reads twice, and excluding various things
-                    final HashSet<String> readNames = new HashSet<String>(info.getRecordAndPositions().size());
-                    int pileupSize = 0;
-                    for (final SamLocusIterator.RecordAndOffset recs : info.getRecordAndPositions()) {
+                    int recLength = info.getRecordAndPositions().size();
+                    if (recLength > 0) {
+                        // Figure out the coverage while not counting overlapping reads twice, and excluding various things
+                        final HashSet<String> readNames = new HashSet<String>(info.getRecordAndPositions().size());
+                        int pileupSize = 0;
+                        for (final SamLocusIterator.RecordAndOffset recs : info.getRecordAndPositions()) {
 
-                        if (recs.getBaseQuality() < MINIMUM_BASE_QUALITY) {
-                            basesExcludedByBaseq.incrementAndGet();
-                            continue;
+                            if (recs.getBaseQuality() < MINIMUM_BASE_QUALITY) {
+                                basesExcludedByBaseq.incrementAndGet();
+                                continue;
+                            }
+                            if (!readNames.add(recs.getRecord().getReadName())) {
+                                basesExcludedByOverlap.incrementAndGet();
+                                continue;
+                            }
+                            pileupSize++;
+                            if (pileupSize <= max) {
+                                baseQHistogramArray[recs.getRecord().getBaseQualities()[recs.getOffset()]].incrementAndGet();
+                            }
                         }
-                        if (!readNames.add(recs.getRecord().getReadName())) {
-                            basesExcludedByOverlap.incrementAndGet();
-                            continue;
-                        }
-                        pileupSize++;
-                        if (pileupSize <= max) {
-                            baseQHistogramArray[recs.getRecord().getBaseQualities()[recs.getOffset()]].incrementAndGet();
-                        }
+
+                        final int depth = Math.min(readNames.size(), max);
+                        if (depth < readNames.size())
+                            basesExcludedByCapping.addAndGet(readNames.size() - max);
+                        HistogramArray[depth].incrementAndGet();
+                    } else {
+                        HistogramArray[0].incrementAndGet();
                     }
-
-                    final int depth = Math.min(readNames.size(), max);
-                    if (depth < readNames.size())
-                        basesExcludedByCapping.addAndGet(readNames.size() - max);
-                    HistogramArray[depth].incrementAndGet();
-
                 }
             });
 
-
             // Record progress and perhaps stop
             progress.record(info.getSequenceName(), info.getPosition());
-
 
             if (usingStopAfter && ++counter > stopAfter)
                 break;
