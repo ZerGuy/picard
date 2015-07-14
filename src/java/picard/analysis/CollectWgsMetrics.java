@@ -126,6 +126,8 @@ public class CollectWgsMetrics extends CommandLineProgram {
         public double PCT_100X;
     }
 
+    public static final int PACK_SIZE = 1000;
+
     public static void main(final String[] args) {
         new CollectWgsMetrics().instanceMainWithExit(args);
     }
@@ -185,6 +187,8 @@ public class CollectWgsMetrics extends CommandLineProgram {
         System.out.println("Step 1 (start - before while): " + elapsed);
         time1 = System.currentTimeMillis();
 
+        List<SamLocusIterator.LocusInfo> pack = new ArrayList<SamLocusIterator.LocusInfo>(PACK_SIZE);
+        int iterationsCounter = 0;
         ExecutorService executorService = Executors.newFixedThreadPool(2);
 
         // Loop through all the loci
@@ -194,39 +198,53 @@ public class CollectWgsMetrics extends CommandLineProgram {
             // Check that the reference is not N
             final ReferenceSequence ref = refWalker.get(info.getSequenceIndex());
             final byte base = ref.getBases()[info.getPosition() - 1];
-            if (base == 'N') continue;
+            if (base == 'N')
+                continue;
+
+            final int recLength = info.getRecordAndPositions().size();
+            pack.add(info);
+            iterationsCounter += recLength;
+//            System.out.println(iterationsCounter);
+            if ((iterationsCounter < PACK_SIZE) && (pack.size() < 100) && (iterator.hasNext())) {
+                continue;
+            }
+
+//            System.out.println("pack");
+            final List<SamLocusIterator.LocusInfo> tempPack = pack;
+            pack = new ArrayList<SamLocusIterator.LocusInfo>(PACK_SIZE);
+            iterationsCounter = 0;
 
             executorService.submit(new Runnable() {
                 @Override
                 public void run() {
+                    System.out.println(tempPack.size());
+                    for (final SamLocusIterator.LocusInfo info : tempPack) {
+                        if (info.getRecordAndPositions().size() > 0) {
+                            // Figure out the coverage while not counting overlapping reads twice, and excluding various things
+                            final HashSet<String> readNames = new HashSet<String>(info.getRecordAndPositions().size());
+                            int pileupSize = 0;
+                            for (final SamLocusIterator.RecordAndOffset recs : info.getRecordAndPositions()) {
+                                if (recs.getBaseQuality() < MINIMUM_BASE_QUALITY) {
+                                    basesExcludedByBaseq.incrementAndGet();
+                                    continue;
+                                }
+                                if (!readNames.add(recs.getRecord().getReadName())) {
+                                    basesExcludedByOverlap.incrementAndGet();
+                                    continue;
+                                }
+                                pileupSize++;
+                                if (pileupSize <= max) {
+                                    baseQHistogramArray[recs.getRecord().getBaseQualities()[recs.getOffset()]].incrementAndGet();
+                                }
+                            }
 
-                    int recLength = info.getRecordAndPositions().size();
-                    if (recLength > 0) {
-                        // Figure out the coverage while not counting overlapping reads twice, and excluding various things
-                        final HashSet<String> readNames = new HashSet<String>(info.getRecordAndPositions().size());
-                        int pileupSize = 0;
-                        for (final SamLocusIterator.RecordAndOffset recs : info.getRecordAndPositions()) {
-
-                            if (recs.getBaseQuality() < MINIMUM_BASE_QUALITY) {
-                                basesExcludedByBaseq.incrementAndGet();
-                                continue;
-                            }
-                            if (!readNames.add(recs.getRecord().getReadName())) {
-                                basesExcludedByOverlap.incrementAndGet();
-                                continue;
-                            }
-                            pileupSize++;
-                            if (pileupSize <= max) {
-                                baseQHistogramArray[recs.getRecord().getBaseQualities()[recs.getOffset()]].incrementAndGet();
-                            }
+                            final int depth = Math.min(readNames.size(), max);
+                            if (depth < readNames.size())
+                                basesExcludedByCapping.addAndGet(readNames.size() - max);
+                            HistogramArray[depth].incrementAndGet();
+                        } else {
+                            HistogramArray[0].incrementAndGet();
                         }
-
-                        final int depth = Math.min(readNames.size(), max);
-                        if (depth < readNames.size())
-                            basesExcludedByCapping.addAndGet(readNames.size() - max);
-                        HistogramArray[depth].incrementAndGet();
-                    } else {
-                        HistogramArray[0].incrementAndGet();
                     }
                 }
             });
