@@ -204,12 +204,11 @@ public class CollectWgsMetrics extends CommandLineProgram {
             final int recLength = info.getRecordAndPositions().size();
             pack.add(info);
             iterationsCounter += recLength;
-//            System.out.println(iterationsCounter);
-            if ((iterationsCounter < PACK_SIZE) && (pack.size() < 100) && (iterator.hasNext())) {
+            ++counter;
+            if ((iterationsCounter < PACK_SIZE) && (pack.size() < 100) && (iterator.hasNext()) && !(usingStopAfter && counter > stopAfter)) {
                 continue;
             }
 
-//            System.out.println("pack");
             final List<SamLocusIterator.LocusInfo> tempPack = pack;
             pack = new ArrayList<SamLocusIterator.LocusInfo>(PACK_SIZE);
             iterationsCounter = 0;
@@ -217,7 +216,6 @@ public class CollectWgsMetrics extends CommandLineProgram {
             executorService.submit(new Runnable() {
                 @Override
                 public void run() {
-                    System.out.println(tempPack.size());
                     for (final SamLocusIterator.LocusInfo info : tempPack) {
                         if (info.getRecordAndPositions().size() > 0) {
                             // Figure out the coverage while not counting overlapping reads twice, and excluding various things
@@ -252,7 +250,7 @@ public class CollectWgsMetrics extends CommandLineProgram {
             // Record progress and perhaps stop
             progress.record(info.getSequenceName(), info.getPosition());
 
-            if (usingStopAfter && ++counter > stopAfter)
+            if (usingStopAfter && counter > stopAfter)
                 break;
         }
 
