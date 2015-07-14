@@ -126,7 +126,8 @@ public class CollectWgsMetrics extends CommandLineProgram {
         public double PCT_100X;
     }
 
-    public static final int PACK_SIZE = 1000;
+    public static final int PACK_MAX_SIZE = 1000;
+    public static final int PACK_MAX_ITERATIONS_SUM = 1000;
 
     public static void main(final String[] args) {
         new CollectWgsMetrics().instanceMainWithExit(args);
@@ -187,7 +188,7 @@ public class CollectWgsMetrics extends CommandLineProgram {
         System.out.println("Step 1 (start - before while): " + elapsed);
         time1 = System.currentTimeMillis();
 
-        List<SamLocusIterator.LocusInfo> pack = new ArrayList<SamLocusIterator.LocusInfo>(PACK_SIZE);
+        List<SamLocusIterator.LocusInfo> pack = new ArrayList<SamLocusIterator.LocusInfo>(PACK_MAX_SIZE);
         int iterationsCounter = 0;
         ExecutorService executorService = Executors.newFixedThreadPool(2);
 
@@ -205,12 +206,13 @@ public class CollectWgsMetrics extends CommandLineProgram {
             pack.add(info);
             iterationsCounter += recLength;
             ++counter;
-            if ((iterationsCounter < PACK_SIZE) && (pack.size() < 100) && (iterator.hasNext()) && !(usingStopAfter && counter > stopAfter)) {
+            if ((iterationsCounter < PACK_MAX_ITERATIONS_SUM) && (pack.size() < PACK_MAX_SIZE) &&
+                    (iterator.hasNext()) && !(usingStopAfter && counter > stopAfter)) {
                 continue;
             }
 
             final List<SamLocusIterator.LocusInfo> tempPack = pack;
-            pack = new ArrayList<SamLocusIterator.LocusInfo>(PACK_SIZE);
+            pack = new ArrayList<SamLocusIterator.LocusInfo>(PACK_MAX_SIZE);
             iterationsCounter = 0;
 
             executorService.submit(new Runnable() {
