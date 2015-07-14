@@ -26,8 +26,11 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -126,8 +129,9 @@ public class CollectWgsMetrics extends CommandLineProgram {
         public double PCT_100X;
     }
 
-    public static final int PACK_MAX_SIZE = 1000;
+    public static final int PACK_MAX_SIZE = 300;
     public static final int PACK_MAX_ITERATIONS_SUM = 1000;
+    private static final int QUEUE_CAPACITY = 100;
 
     public static void main(final String[] args) {
         new CollectWgsMetrics().instanceMainWithExit(args);
@@ -169,7 +173,7 @@ public class CollectWgsMetrics extends CommandLineProgram {
         final AtomicLong[] baseQHistogramArray = new AtomicLong[Byte.MAX_VALUE];
         final boolean usingStopAfter = STOP_AFTER > 0;
         final long stopAfter = STOP_AFTER - 1;
-        long counter = 0;
+        final AtomicLong counter = new AtomicLong(0);
 
         final AtomicLong basesExcludedByBaseq = new AtomicLong(0);
         final AtomicLong basesExcludedByOverlap = new AtomicLong(0);
@@ -188,9 +192,67 @@ public class CollectWgsMetrics extends CommandLineProgram {
         System.out.println("Step 1 (start - before while): " + elapsed);
         time1 = System.currentTimeMillis();
 
+        final ExecutorService executorService = Executors.newFixedThreadPool(3);
+
+        final Semaphore sem = new Semaphore(6);
+
+        final BlockingQueue<List<SamLocusIterator.LocusInfo>> packsQueue =
+                new LinkedBlockingDeque<List<SamLocusIterator.LocusInfo>>(QUEUE_CAPACITY);
         List<SamLocusIterator.LocusInfo> pack = new ArrayList<SamLocusIterator.LocusInfo>(PACK_MAX_SIZE);
         int iterationsCounter = 0;
-        ExecutorService executorService = Executors.newFixedThreadPool(2);
+
+        executorService.execute(new Runnable() {
+            @Override
+            public void run() {
+                while (!((usingStopAfter && counter.get() > stopAfter) && packsQueue.isEmpty())) {
+//                    System.out.println(packsQueue.remainingCapacity());
+                    try {
+                        final List<SamLocusIterator.LocusInfo> tempPack = packsQueue.take();
+
+                        sem.acquire();
+
+                        executorService.execute(new Runnable() {
+                            @Override
+                            public void run() {
+                                for (final SamLocusIterator.LocusInfo info : tempPack) {
+                                    if (info.getRecordAndPositions().size() > 0) {
+                                        // Figure out the coverage while not counting overlapping reads twice, and excluding various things
+                                        final HashSet<String> readNames = new HashSet<String>(info.getRecordAndPositions().size());
+                                        int pileupSize = 0;
+                                        for (final SamLocusIterator.RecordAndOffset recs : info.getRecordAndPositions()) {
+                                            if (recs.getBaseQuality() < MINIMUM_BASE_QUALITY) {
+                                                basesExcludedByBaseq.incrementAndGet();
+                                                continue;
+                                            }
+                                            if (!readNames.add(recs.getRecord().getReadName())) {
+                                                basesExcludedByOverlap.incrementAndGet();
+                                                continue;
+                                            }
+                                            pileupSize++;
+                                            if (pileupSize <= max) {
+                                                baseQHistogramArray[recs.getRecord().getBaseQualities()[recs.getOffset()]].incrementAndGet();
+                                            }
+                                        }
+
+                                        final int depth = Math.min(readNames.size(), max);
+                                        if (depth < readNames.size())
+                                            basesExcludedByCapping.addAndGet(readNames.size() - max);
+                                        HistogramArray[depth].incrementAndGet();
+                                    } else {
+                                        HistogramArray[0].incrementAndGet();
+                                    }
+                                }
+
+                                sem.release();
+                            }
+                        });
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+                executorService.shutdown();
+            }
+        });
 
         // Loop through all the loci
         while (iterator.hasNext()) {
@@ -199,64 +261,41 @@ public class CollectWgsMetrics extends CommandLineProgram {
             // Check that the reference is not N
             final ReferenceSequence ref = refWalker.get(info.getSequenceIndex());
             final byte base = ref.getBases()[info.getPosition() - 1];
-            if (base == 'N')
-                continue;
-
-            final int recLength = info.getRecordAndPositions().size();
-            pack.add(info);
-            iterationsCounter += recLength;
-            ++counter;
-            if ((iterationsCounter < PACK_MAX_ITERATIONS_SUM) && (pack.size() < PACK_MAX_SIZE) &&
-                    (iterator.hasNext()) && !(usingStopAfter && counter > stopAfter)) {
+            if (base == 'N') {
                 continue;
             }
 
-            final List<SamLocusIterator.LocusInfo> tempPack = pack;
+            //Adding info to pack
+            final int recLength = info.getRecordAndPositions().size();
+            pack.add(info);
+            iterationsCounter += recLength;
+            counter.incrementAndGet();
+
+            //Check if pack is ready
+            if ((iterationsCounter < PACK_MAX_ITERATIONS_SUM) && (pack.size() < PACK_MAX_SIZE) &&
+                    (iterator.hasNext()) && !(usingStopAfter && counter.get() > stopAfter)) {
+                continue;
+            }
+
+//            System.out.println("putting pack in queue");
+            try {
+                packsQueue.put(pack);
+//                System.out.println("Put: " + packsQueue.remainingCapacity());
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+
             pack = new ArrayList<SamLocusIterator.LocusInfo>(PACK_MAX_SIZE);
             iterationsCounter = 0;
-
-            executorService.submit(new Runnable() {
-                @Override
-                public void run() {
-                    for (final SamLocusIterator.LocusInfo info : tempPack) {
-                        if (info.getRecordAndPositions().size() > 0) {
-                            // Figure out the coverage while not counting overlapping reads twice, and excluding various things
-                            final HashSet<String> readNames = new HashSet<String>(info.getRecordAndPositions().size());
-                            int pileupSize = 0;
-                            for (final SamLocusIterator.RecordAndOffset recs : info.getRecordAndPositions()) {
-                                if (recs.getBaseQuality() < MINIMUM_BASE_QUALITY) {
-                                    basesExcludedByBaseq.incrementAndGet();
-                                    continue;
-                                }
-                                if (!readNames.add(recs.getRecord().getReadName())) {
-                                    basesExcludedByOverlap.incrementAndGet();
-                                    continue;
-                                }
-                                pileupSize++;
-                                if (pileupSize <= max) {
-                                    baseQHistogramArray[recs.getRecord().getBaseQualities()[recs.getOffset()]].incrementAndGet();
-                                }
-                            }
-
-                            final int depth = Math.min(readNames.size(), max);
-                            if (depth < readNames.size())
-                                basesExcludedByCapping.addAndGet(readNames.size() - max);
-                            HistogramArray[depth].incrementAndGet();
-                        } else {
-                            HistogramArray[0].incrementAndGet();
-                        }
-                    }
-                }
-            });
 
             // Record progress and perhaps stop
             progress.record(info.getSequenceName(), info.getPosition());
 
-            if (usingStopAfter && counter > stopAfter)
+            if (usingStopAfter && counter.get() > stopAfter) {
                 break;
+            }
         }
 
-        executorService.shutdown();
         try {
             executorService.awaitTermination(1, TimeUnit.DAYS);
         } catch (InterruptedException e) {
