@@ -174,14 +174,8 @@ public class CollectWgsMetrics extends CommandLineProgram {
         System.out.println("Step 1 (start - before while): " + elapsed);
         time1 = System.currentTimeMillis();
 
-        double step1=0, step2=0, step3=0;
-        long temp1, temp2;
-        long myCounter=0;
-
         // Loop through all the loci
         while (iterator.hasNext()) {
-            myCounter++;
-            temp1=System.nanoTime();
 
             final SamLocusIterator.LocusInfo info = iterator.next();
 
@@ -189,10 +183,6 @@ public class CollectWgsMetrics extends CommandLineProgram {
             final ReferenceSequence ref = refWalker.get(info.getSequenceIndex());
             final byte base = ref.getBases()[info.getPosition() - 1];
             if (base == 'N') continue;
-
-            //
-            temp2 = System.nanoTime();
-            step1+=temp2-temp1;
 
             // Figure out the coverage while not counting overlapping reads twice, and excluding various things
             final HashSet<String> readNames = new HashSet<String>(info.getRecordAndPositions().size());
@@ -213,10 +203,6 @@ public class CollectWgsMetrics extends CommandLineProgram {
                 }
             }
 
-            //
-            temp1=System.nanoTime();
-            step2+=temp1-temp2;
-
             final int depth = Math.min(readNames.size(), max);
             if (depth < readNames.size()) basesExcludedByCapping += readNames.size() - max;
             HistogramArray[depth]++;
@@ -225,18 +211,12 @@ public class CollectWgsMetrics extends CommandLineProgram {
             progress.record(info.getSequenceName(), info.getPosition());
             if (usingStopAfter && ++counter > stopAfter) break;
 
-            temp2=System.nanoTime();
-            step3+=temp2-temp1;
         }
 
         //*** Time
         time2 = System.currentTimeMillis();
         elapsed = time2 - time1;
         System.out.println("Step 2 (while): " + elapsed);
-        step1/=myCounter;
-        step2/=myCounter;
-        step3/=myCounter;
-        System.out.println("WHILE: Step 1: " + step1 + "; Step 2: " + step2 + "; Step 3: " + step3);
         time1 = System.currentTimeMillis();
 
         // Construct and write the outputs
