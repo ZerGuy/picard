@@ -129,9 +129,11 @@ public class CollectWgsMetrics extends CommandLineProgram {
         public double PCT_100X;
     }
 
-    public static final int PACK_MAX_SIZE = 300;
-    public static final int PACK_MAX_ITERATIONS_SUM = 1000;
+    public static final int NUM_OF_THREADS = 4;
+    public static final int PACK_MAX_SIZE = 500;
+    public static final int PACK_MAX_ITERATIONS_SUM = 3000;
     private static final int QUEUE_CAPACITY = 100;
+    public static final int SEMAPHORE_PERMITS = 10;
 
     public static void main(final String[] args) {
         new CollectWgsMetrics().instanceMainWithExit(args);
@@ -192,9 +194,9 @@ public class CollectWgsMetrics extends CommandLineProgram {
         System.out.println("Step 1 (start - before while): " + elapsed);
         time1 = System.currentTimeMillis();
 
-        final ExecutorService executorService = Executors.newFixedThreadPool(3);
+        final ExecutorService executorService = Executors.newFixedThreadPool(NUM_OF_THREADS);
 
-        final Semaphore sem = new Semaphore(6);
+        final Semaphore sem = new Semaphore(SEMAPHORE_PERMITS);
 
         final BlockingQueue<List<SamLocusIterator.LocusInfo>> packsQueue =
                 new LinkedBlockingDeque<List<SamLocusIterator.LocusInfo>>(QUEUE_CAPACITY);
